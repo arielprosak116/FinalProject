@@ -1,0 +1,4 @@
+torch
+pyserini==0.36.0
+python-dotenv
+tqdm
