@@ -9,12 +9,18 @@ from pyserini.search.lucene import LuceneSearcher
 import pickle
 
 class SearchEngine:
-    def __init__(self, approach="qld"):
+    def __init__(self):
         self.reader = IndexReader.from_prebuilt_index('robust04')
         self.searcher = LuceneSearcher.from_prebuilt_index('robust04')
-        if approach=="qld":
-            self.searcher.set_qld(mu=1000)
         # Other approaches here
+
+    def set_searcher(self, approach="qld"):
+        if approach=="qld":
+            # Setting query likelihood with dirichle of 1000
+            self.searcher.set_qld(mu=1000)
+
+            # Setting RM3 expanding the query, with a safe alpha
+            self.searcher.set_rm3(fb_terms=5, fb_docs=10, original_query_weight=0.8)
 
     def get_top_k(self, query, k=5, to_chunk=False):
         """
@@ -30,6 +36,7 @@ class SearchEngine:
         # Get text from hits
         for hit in hits:
             doc = self.searcher.doc(hit.docid)
+            # print(hit.docid)
             raw_doc = doc.raw()
             # TODO metadata
             # metadata = {'wiki_id':data.get('wikipedia_id', ''),
