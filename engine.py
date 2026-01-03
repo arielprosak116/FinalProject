@@ -30,15 +30,14 @@ class SearchEngine:
         # Get text from hits
         for hit in hits:
             doc = self.searcher.doc(hit.docid)
-            raw_json = doc.raw()
-            data = json.loads(raw_json)
-            contents = data['contents']
-            content = contents.replace('\n', ' ')
+            raw_doc = doc.raw()
+            # TODO metadata
             # metadata = {'wiki_id':data.get('wikipedia_id', ''),
             #             'title': data.get('wikipedia_title', ''),
             #             'categories': data.get('categories', ',').split(','),}
             # context_metadatas.append(metadata)
-            context.append(content)
+            # TODO proper parsing
+            context.append(raw_doc)
         if not to_chunk:
             return context, context_metadatas
         else: # Passage retrieval stuff
