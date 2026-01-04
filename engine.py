@@ -31,26 +31,19 @@ class SearchEngine:
         :return:
         """
         context = []
-        context_metadatas = [] # TODO look for metadata
         hits = self.searcher.search(query, k)
         # Get text from hits
         for hit in hits:
             doc = self.searcher.doc(hit.docid)
-            # print(hit.docid)
             raw_doc = doc.raw()
-            # TODO metadata
-            # metadata = {'wiki_id':data.get('wikipedia_id', ''),
-            #             'title': data.get('wikipedia_title', ''),
-            #             'categories': data.get('categories', ',').split(','),}
-            # context_metadatas.append(metadata)
             # TODO proper parsing
-            context.append(raw_doc)
+            context.append((hit.docid, raw_doc, hit.score))
         if not to_chunk:
-            return context, context_metadatas
+            return context
         else: # Passage retrieval stuff
             # all_paragraphs = clean_split_wiki_docs(context, context_metadatas)
             #return all_paragraphs
-            return context, context_metadatas
+            return context
 
     def get_context_batch(self, samples, k=5, save_name=None):
         all_contexts = {}
