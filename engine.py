@@ -18,9 +18,10 @@ class SearchEngine:
         if approach=="qld":
             # Setting query likelihood with dirichle of 1000
             self.searcher.set_qld(mu=1000)
-
             # Setting RM3 expanding the query, with a safe alpha
             self.searcher.set_rm3(fb_terms=5, fb_docs=10, original_query_weight=0.8)
+        elif approach=="bm25":
+            self.searcher.set_bm25(k1=0.9, b=0.4)
 
     def get_top_k(self, query, k=5, to_chunk=False):
         """
@@ -62,3 +63,29 @@ class SearchEngine:
         else:
             print("Did not provide save_name, no pkl will be created")
         return all_contexts
+
+    def search_and_write_trec_run(self, query, k, topic_id, run_tag, output_file):
+        hits = self.searcher.search(query, k)
+        hits_sorted = sorted(hits, key=lambda h: h.score, reverse=True)
+        with open(output_file, "a", encoding="utf-8") as f:
+            for rank, hit in enumerate(hits_sorted, start=1):
+                f.write(
+                    f"{topic_id} Q0 {hit.docid} {rank} {hit.score:.6f} {run_tag}\n"
+                )
+
+    def search_all_queries(self, topics, k=1000, run_tag="run1", output_file="run.txt"):
+        """
+        Search all queries according to topics list
+        :param topics: list of [(query id, query]
+        :param k: top results to retrieve (default: 1000)
+        :param run_tag: name of run to write as the format
+        :param output_file: name of outputfile (default: run.txt)
+        :return:
+        """
+
+        # Clear the file
+        with open(output_file, "w", encoding="utf-8") as f:
+            pass
+
+        for qid, query in topics.items():
+            self.search_and_write_trec_run(query, k, qid, run_tag, output_file)
