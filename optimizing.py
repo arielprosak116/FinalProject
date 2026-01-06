@@ -11,9 +11,10 @@ class Optimize:
                      fb_terms_values,
                      fb_docs_values,
                      og_query_weight_values,
+                     mus,
                      k=200,
                      qrels_path="Data/qrels_50_Queries",
-                     results_file="qld_results.txt"):
+                     results_file="qld_mu_results.txt"):
 
         with open(results_file, "w", encoding="utf-8") as f:
             f.write("fb_terms\tfb_docs\toriginal_query_weight\tMAP\n")
@@ -25,27 +26,29 @@ class Optimize:
         for fb_terms in fb_terms_values:
             for fb_docs in fb_docs_values:
                 for original_query_weight in og_query_weight_values:
-                    self.se.set_searcher(approach="qld",
-                                         fb_terms=fb_terms,
-                                         fb_docs=fb_docs,
-                                         original_query_weight=original_query_weight)
+                    for mu in mus:
+                        self.se.set_searcher(approach="qld",
+                                             fb_terms=fb_terms,
+                                             fb_docs=fb_docs,
+                                             original_query_weight=original_query_weight,
+                                             mu=mu)
 
-                    self.se.search_all_queries(topics, k)
-                    run = load_run("run.txt")
+                        self.se.search_all_queries(topics, k)
+                        run = load_run("run.txt")
 
-                    map_score, ap_by_q = mean_average_precision(qrels, run)
+                        map_score, ap_by_q = mean_average_precision(qrels, run)
 
-                    with open(results_file, "a", encoding="utf-8") as f:
-                        f.write(f"{fb_terms}\t{fb_docs}\t{original_query_weight}\t{map_score:.6f}\n")
-                    print(f"fb_terms={fb_terms}, fb_docs={fb_docs}, "
-                        f"w={original_query_weight} -> MAP={map_score:.6f}")
+                        with open(results_file, "a", encoding="utf-8") as f:
+                            f.write(f"{fb_terms}\t{fb_docs}\t{original_query_weight}\t{mu}\t{map_score:.6f}\n")
+                        print(f"fb_terms={fb_terms}, fb_docs={fb_docs}, "
+                            f"w={original_query_weight}, mu={mu} -> MAP={map_score:.6f}")
 
-                    if map_score > best_map:
-                        best_map = map_score
-                        best_params = (fb_terms, fb_docs, original_query_weight)
+                        if map_score > best_map:
+                            best_map = map_score
+                            best_params = (fb_terms, fb_docs, original_query_weight, mu)
 
-                    # print(fb_term, fb_docs, original_query_weight + " map is " + map_score)
+                        # print(fb_term, fb_docs, original_query_weight + " map is " + map_score)
 
         print("\nBEST:")
         print(f"fb_terms={best_params[0]}, fb_docs={best_params[1]}, "
-              f"w={best_params[2]} -> MAP={best_map:.6f}")
+              f"w={best_params[2]}, mu={best_params[3]} -> MAP={best_map:.6f}")

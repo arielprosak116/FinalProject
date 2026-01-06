@@ -14,10 +14,10 @@ class SearchEngine:
         self.searcher = LuceneSearcher.from_prebuilt_index('robust04')
         # Other approaches here
 
-    def set_searcher(self, approach="qld", fb_terms=5, fb_docs=10, original_query_weight=0.8):
+    def set_searcher(self, approach="qld", fb_terms=5, fb_docs=10, original_query_weight=0.8, mu=1000):
         if approach=="qld":
             # Setting query likelihood with dirichle of 1000
-            self.searcher.set_qld(mu=1000)
+            self.searcher.set_qld(mu=mu)
             # Setting RM3 expanding the query, with a safe alpha
             self.searcher.set_rm3(fb_terms=fb_terms, fb_docs=fb_docs, original_query_weight=original_query_weight)
         elif approach=="bm25":
