@@ -82,6 +82,13 @@ def mean_average_precision(
     map_score = sum(ap_values) / len(ap_values) if ap_values else 0.0
     return map_score, ap_by_q
 
+def get_map_by_paths(qrels_path, run_path):
+    qrels = load_qrels(qrels_path)  # or "qrel301.txt"
+    run = load_run(run_path)
+
+    map_score, ap_by_q = mean_average_precision(qrels, run)
+    return map_score
+
 def load_topics(path):
     """
     Input format:
