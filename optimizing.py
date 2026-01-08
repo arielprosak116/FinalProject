@@ -34,7 +34,7 @@ class Optimize:
                                              mu=mu)
 
                         self.se.search_all_queries(topics, k)
-                        run = load_run("run.txt")
+                        run = load_run("Results/run.txt")
 
                         map_score, ap_by_q = mean_average_precision(qrels, run)
 
