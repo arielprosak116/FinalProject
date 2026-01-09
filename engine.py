@@ -5,11 +5,14 @@ os.environ["JAVA_HOME"] = os.getenv("JAVA_HOME")
 from tqdm import tqdm
 from pyserini.index.lucene import IndexReader
 from pyserini.search.lucene import LuceneSearcher
-import pickle
 from processing import split_passages, clean_robust
 from sentence_transformers import CrossEncoder, SentenceTransformer
 import re
 from collections import defaultdict
+import torch
+
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+CROSS_ENCODER = CrossEncoder(os.getenv("CROSS_ENCODER"), device=DEVICE)
 
 class SearchEngine:
     def __init__(self):
@@ -19,7 +22,7 @@ class SearchEngine:
 
     def set_searcher(self, approach="qld", fb_terms=5, fb_docs=10, original_query_weight=0.8, mu=1000):
         if approach=="qld":
-            # Setting query likelihood with dirichle of 1000
+            # Setting query likelihood with dirichlet prior
             self.searcher.set_qld(mu=mu)
             # Setting RM3 expanding the query, with a safe alpha
             self.searcher.set_rm3(fb_terms=fb_terms, fb_docs=fb_docs, original_query_weight=original_query_weight)
@@ -49,7 +52,7 @@ class SearchEngine:
                 context.append((raw_doc, {'docid': hit.docid, 'score':hit.score}))
         return context
 
-    def rerank(self, query, retrieval_candidates, max_weight=0.8):
+    def rerank(self, query, retrieval_candidates, max_weight=0.8, reranker=CROSS_ENCODER):
         def _remove_whitespaces(text):
             WS_NEWLINES = re.compile(r"\s*\n\s*")
             WS_SPACES = re.compile(r"[ \t]+")
@@ -58,11 +61,10 @@ class SearchEngine:
             return text
         def _collated_doc_score(scores, max_weight=0.8):
             return max(scores)*max_weight + (1-max_weight)*(sum(scores)-max(scores))/(len(scores)-1)
-        reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2', device='cuda') #TODO should be initialized at the start
         pairs = [[query, _remove_whitespaces(doc.page_content)] for doc in retrieval_candidates]
         cross_scores = reranker.predict(pairs)
         per_doc_scores = defaultdict(list)
-        for doc, score in zip(cross_scores, retrieval_candidates):
+        for score, doc in zip(cross_scores, retrieval_candidates):
             per_doc_scores[doc.metadata['docid']].append(score)
         collated_doc_scores = {}
         for docid, scores in per_doc_scores.items():
@@ -75,8 +77,9 @@ class SearchEngine:
         hits = self.get_top_k(query, k, clean=True) # Hits are score-sorted by default
         top_m = hits[:m]
         passages_top_m = split_passages(top_m)
-        docs_reranked = self.rerank(query, passages_top_m)
-        return docs_reranked
+        top_docs_reranked = self.rerank(query, passages_top_m)
+        all_docs = top_docs_reranked + [(hit[1]["docid"], hit[1]["score"]) for hit in hits[m:]]
+        return all_docs
 
 
     def search_and_write_trec_run(self, query, k, topic_id, run_tag, output_file, m=100):
