@@ -1,4 +1,11 @@
 GOAL - getting high scores on hard queries.
+- RRF w/originaL
+- Hard queries
+- Copy ariel code
+- doc.id unified structure
+- Write parameter-testing code to maximize performance?
+- Upgrade to the newest qwen reranker? nvembed?
+
 
 - Initial retrieval - top 1000 docs using rm3, take top 100
 - Splitting 100 docs to paragraphs

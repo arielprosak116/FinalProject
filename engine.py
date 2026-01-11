@@ -5,14 +5,55 @@ os.environ["JAVA_HOME"] = os.getenv("JAVA_HOME")
 from tqdm import tqdm
 from pyserini.index.lucene import IndexReader
 from pyserini.search.lucene import LuceneSearcher
-from processing import split_passages, clean_robust
-from sentence_transformers import CrossEncoder, SentenceTransformer
+from processing import split_passages, clean_robust, Hit
+from sentence_transformers import CrossEncoder
 import re
 from collections import defaultdict
 import torch
 
+
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(DEVICE)
 CROSS_ENCODER = CrossEncoder(os.getenv("CROSS_ENCODER"), device=DEVICE)
+
+
+def weighted_rrf_fuse(runs, weights=None, rrf_k=60):
+    """
+    runs: list[list[Hit]] docids ordered best->worst
+    weights: list[float] same length as runs, defaults to 1/len(runs) each
+    """
+    assert sum(weights) == 1.0, "Weights must sum to 1.0"
+    if weights is None:
+        weights = [1/len(runs)] * len(runs)
+    scores = defaultdict(float)
+    for run, w in zip(runs, weights):
+        for rank, hit in enumerate(run, start=1):
+            scores[hit.docid] += w * (1.0 / (rrf_k + rank))
+
+    fused = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return [(docid, score) for docid, score in fused]
+
+
+def rerank(query, retrieval_candidates, max_weight=0.8, reranker=CROSS_ENCODER):
+    def _remove_whitespaces(text):
+        WS_NEWLINES = re.compile(r"\s*\n\s*")
+        WS_SPACES = re.compile(r"[ \t]+")
+        text = WS_NEWLINES.sub(" ", text)
+        text = WS_SPACES.sub(" ", text)
+        return text
+    def _collated_doc_score(scores, max_weight=0.8):
+        return max(scores)*max_weight + (1-max_weight)*(sum(scores)-max(scores))/(len(scores)-1)
+    pairs = [[query, _remove_whitespaces(doc.page_content)] for doc in retrieval_candidates]
+    cross_scores = reranker.predict(pairs)
+    per_doc_scores = defaultdict(list)
+    for score, doc in zip(cross_scores, retrieval_candidates):
+        per_doc_scores[doc.metadata['docid']].append(score)
+    collated_doc_scores = {}
+    for docid, scores in per_doc_scores.items():
+        collated_doc_scores[docid] = _collated_doc_score(scores, max_weight=max_weight)
+    ranked = sorted(collated_doc_scores.items(), key=lambda x: x[1], reverse=True)
+    return [Hit(docid=doc[0], score=doc[1]) for doc in ranked]
+
 
 class SearchEngine:
     def __init__(self):
@@ -45,52 +86,31 @@ class SearchEngine:
             raw_doc = doc.raw()
             if clean:
                 cleaned_doc, doc_metadata = clean_robust(raw_doc)
-                doc_metadata['docid'] = hit.docid
-                doc_metadata['score'] = hit.score
-                context.append((cleaned_doc, doc_metadata))
+                context.append(Hit(query=query, docid=hit.docid, score=hit.score, meta=doc_metadata, text=cleaned_doc))
             else:
-                context.append((raw_doc, {'docid': hit.docid, 'score':hit.score}))
+                context.append(Hit(query=query, docid=hit.docid, score=hit.score))
         return context
 
-    def rerank(self, query, retrieval_candidates, max_weight=0.8, reranker=CROSS_ENCODER):
-        def _remove_whitespaces(text):
-            WS_NEWLINES = re.compile(r"\s*\n\s*")
-            WS_SPACES = re.compile(r"[ \t]+")
-            text = WS_NEWLINES.sub(" ", text)
-            text = WS_SPACES.sub(" ", text)
-            return text
-        def _collated_doc_score(scores, max_weight=0.8):
-            return max(scores)*max_weight + (1-max_weight)*(sum(scores)-max(scores))/(len(scores)-1)
-        pairs = [[query, _remove_whitespaces(doc.page_content)] for doc in retrieval_candidates]
-        cross_scores = reranker.predict(pairs)
-        per_doc_scores = defaultdict(list)
-        for score, doc in zip(cross_scores, retrieval_candidates):
-            per_doc_scores[doc.metadata['docid']].append(score)
-        collated_doc_scores = {}
-        for docid, scores in per_doc_scores.items():
-            collated_doc_scores[docid] = _collated_doc_score(scores, max_weight=max_weight)
-        ranked = sorted(collated_doc_scores.items(), key=lambda x: x[1], reverse=True)
-        return ranked
-
-    def retrieve_rerank(self, query, k=1000, m=100):
+    def retrieve_rerank(self, query, k=1000, m=100, fusion_weight=0):
         assert k>=m, "initial retrieval k must be bigger-equal than fine reranker m"
         hits = self.get_top_k(query, k, clean=True) # Hits are score-sorted by default
         top_m = hits[:m]
         passages_top_m = split_passages(top_m)
-        top_docs_reranked = self.rerank(query, passages_top_m)
-        all_docs = top_docs_reranked + [(hit[1]["docid"], hit[1]["score"]) for hit in hits[m:]]
-        return all_docs
+        top_m_reranked = rerank(query, passages_top_m)
+        top_m_fused = [Hit(docid=doc_score_tuple[0], score=doc_score_tuple[1]) for doc_score_tuple in weighted_rrf_fuse([top_m_reranked, top_m], weights=[1-fusion_weight,fusion_weight])]
+        all_docs_reranked = top_m_fused + hits[m:]
+        return all_docs_reranked
 
 
-    def search_and_write_trec_run(self, query, k, topic_id, run_tag, output_file, m=100):
-        hits = self.retrieve_rerank(query, k, m)
+    def search_and_write_trec_run(self, query, k, topic_id, run_tag, output_file, m=100, fusion_weight=0):
+        hits = self.retrieve_rerank(query, k, m, fusion_weight)
         with open(output_file, "a", encoding="utf-8") as f:
             for rank, hit in enumerate(hits, start=1):
                 f.write(
                     f"{topic_id} Q0 {hit.docid} {rank} {hit.score:.6f} {run_tag}\n"
                 )
 
-    def search_all_queries(self, topics, k=1000, run_tag="run1", output_file="run.txt", m=100):
+    def search_all_queries(self, topics, k=1000, run_tag="run1", output_file="run.txt", m=100, fusion_weight=0):
         """
         Search all queries according to topics list
         :param topics: list of [(query id, query]
@@ -105,5 +125,5 @@ class SearchEngine:
         with open(output_file, "w", encoding="utf-8") as f:
             pass
 
-        for qid, query in topics.items():
-            self.search_and_write_trec_run(query, k, qid, run_tag, output_file, m=m)
+        for qid, query in tqdm(topics.items(), desc="Searching topics"):
+            self.search_and_write_trec_run(query, k, qid, run_tag, output_file, m=m, fusion_weight=fusion_weight)

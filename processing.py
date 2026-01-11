@@ -1,11 +1,11 @@
-import re
 import os
 import ast
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from dotenv import load_dotenv
 import re
-from typing import Dict, Tuple, Any, List, Union
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, Tuple, List, Union
 
 load_dotenv()
 SPLITTER_ARGS = ast.literal_eval(os.getenv("SPLITTER_ARGS"))
@@ -23,6 +23,29 @@ _ANY_TAG = re.compile(r"</?[^>]+>")
 
 # Common “annotation-like” remnants you may want to drop from body
 _TEXT_MARKER = re.compile(r"^\s*\[Text\]\s*", re.IGNORECASE)
+
+@dataclass(slots=True)
+class Hit:
+    docid: str
+    score: float
+    query: Optional[str] = None
+    text: Optional[str] = None
+    meta: Dict[str, Any] = field(default_factory=dict)
+
+    def __getattr__(self, name: str):
+        try:
+            return self.meta[name]
+        except KeyError:
+            raise AttributeError(name)
+
+    # For LangChain
+    @property
+    def page_content(self) -> str:
+        return self.text
+
+    @property
+    def metadata(self) -> dict:
+        return {"docid": self.docid, "query": self.query, **self.meta}
 
 def _normalize_ws(s: str) -> str:
     s = s.replace("\r\n", "\n").replace("\r", "\n")
@@ -87,6 +110,5 @@ def clean_robust(raw) -> Tuple[str, Dict[str, Union[str, List[str]]]]:
     body = "\n\n".join(body_parts)
     return body, metadata
 
-def split_passages(hits, splitter=SPLITTER_SINGLETON):
-    article_docs = [Document(page_content=hit[0], metadata=hit[1]) for hit in hits]
-    return splitter.split_documents(article_docs)
+def split_passages(hits: List[Hit], splitter=SPLITTER_SINGLETON):
+    return splitter.split_documents(hits)
