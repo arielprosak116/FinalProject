@@ -68,7 +68,8 @@ class SearchEngine:
             # Setting RM3 expanding the query, with a safe alpha
             self.searcher.set_rm3(fb_terms=fb_terms, fb_docs=fb_docs, original_query_weight=original_query_weight)
         elif approach=="bm25":
-            self.searcher.set_bm25(k1=0.9, b=0.4)
+            self.searcher.set_bm25(k1=0.5, b=0.36)
+            self.searcher.set_rm3(fb_terms=20,fb_docs=5,original_query_weight=0.6)
 
     def get_top_k(self, query, k=5, clean=True  ):
         """
