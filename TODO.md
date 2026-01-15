@@ -6,6 +6,9 @@ GOAL - getting high scores on hard queries.
 - Write parameter-testing code to maximize performance?
 - Upgrade to the newest qwen reranker? nvembed?
 
+- Do LLM query enrichment (one with openai, one with a quantized big model, see the difference in quality)
+- Sentence transformer benchmarking
+- Hard queries analysis → maximize recall for the cross encoder to do its job
 
 - Initial retrieval - top 1000 docs using rm3, take top 100
 - Splitting 100 docs to paragraphs

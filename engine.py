@@ -7,6 +7,7 @@ from pyserini.index.lucene import IndexReader
 from pyserini.search.lucene import LuceneSearcher
 from processing import split_passages, clean_robust, Hit
 from sentence_transformers import CrossEncoder
+from mxbai_rerank import MxbaiRerankV2
 import re
 from collections import defaultdict
 import torch
@@ -14,8 +15,8 @@ import torch
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(DEVICE)
-CROSS_ENCODER = CrossEncoder(os.getenv("CROSS_ENCODER"), device=DEVICE)
-
+CROSS_ENCODER = os.getenv("CROSS_ENCODER")
+SUPPORTED_RERANKERS = ["CE", "mxbai", "monot5", "twolar"]
 
 def weighted_rrf_fuse(runs, weights=None, rrf_k=60):
     """
@@ -34,34 +35,57 @@ def weighted_rrf_fuse(runs, weights=None, rrf_k=60):
     return [(docid, score) for docid, score in fused]
 
 
-def rerank(query, retrieval_candidates, max_weight=0.8, reranker=CROSS_ENCODER):
-    def _remove_whitespaces(text):
-        WS_NEWLINES = re.compile(r"\s*\n\s*")
-        WS_SPACES = re.compile(r"[ \t]+")
-        text = WS_NEWLINES.sub(" ", text)
-        text = WS_SPACES.sub(" ", text)
-        return text
-    def _collated_doc_score(scores, max_weight=0.8):
-        return max(scores)*max_weight + (1-max_weight)*(sum(scores)-max(scores))/(len(scores)-1)
-    pairs = [[query, _remove_whitespaces(doc.page_content)] for doc in retrieval_candidates]
-    cross_scores = reranker.predict(pairs)
-    per_doc_scores = defaultdict(list)
-    for score, doc in zip(cross_scores, retrieval_candidates):
-        per_doc_scores[doc.metadata['docid']].append(score)
-    collated_doc_scores = {}
-    for docid, scores in per_doc_scores.items():
-        collated_doc_scores[docid] = _collated_doc_score(scores, max_weight=max_weight)
-    ranked = sorted(collated_doc_scores.items(), key=lambda x: x[1], reverse=True)
-    return [Hit(docid=doc[0], score=doc[1]) for doc in ranked]
+class Reranker:
+    def __init__(self, reranker_type, device=DEVICE, **kwargs):
+        self.reranker_type = reranker_type
+        if self.reranker_type not in SUPPORTED_RERANKERS:
+            raise ValueError(f"reranker_type must be in {SUPPORTED_RERANKERS}")
+        if self.reranker_type == 'CE':
+            self.model = CrossEncoder(CROSS_ENCODER, device=DEVICE)
+        elif self.reranker_type == 'mxbai':
+            self.model = MxbaiRerankV2("mixedbread-ai/mxbai-rerank-large-v2", device=device)
+            print(device)
+            self.model.to(device)
+        else:
+            raise NotImplementedError("Type not implemented yet sry :(")
 
+    def rerank(self, query, retrieval_candidates, max_weight=0.8):
+        def _remove_whitespaces(text):
+            WS_NEWLINES = re.compile(r"\s*\n\s*")
+            WS_SPACES = re.compile(r"[ \t]+")
+            text = WS_NEWLINES.sub(" ", text)
+            text = WS_SPACES.sub(" ", text)
+            return text
+
+        def _collated_doc_score(scores, max_weight=0.8):
+            return max(scores) * max_weight + (1 - max_weight) * (sum(scores) - max(scores)) / (len(scores) - 1) if len(scores) > 1 else max(scores)
+
+        cleaned_docs = [_remove_whitespaces(doc.page_content) for doc in retrieval_candidates]
+        per_doc_scores = defaultdict(list)
+        if self.reranker_type == 'CE':
+            pairs = [[query, cleaned_doc] for cleaned_doc in cleaned_docs]
+            cross_scores = self.model.predict(pairs)
+            for score, doc in zip(cross_scores, retrieval_candidates):
+                per_doc_scores[doc.metadata['docid']].append(score)
+        if self.reranker_type == 'mxbai':
+            id2doc = {i:doc.metadata['docid'] for i, doc in enumerate(retrieval_candidates)}
+            cross_scores = self.model.rank(query, cleaned_docs, return_documents=False)
+            for score in cross_scores:
+                per_doc_scores[id2doc[score.index]].append(score.score)
+
+        collated_doc_scores = {}
+        for docid, scores in per_doc_scores.items():
+            collated_doc_scores[docid] = _collated_doc_score(scores, max_weight=max_weight)
+        ranked = sorted(collated_doc_scores.items(), key=lambda x: x[1], reverse=True)
+        return [Hit(docid=doc[0], score=doc[1]) for doc in ranked]
 
 class SearchEngine:
     def __init__(self):
         self.reader = IndexReader.from_prebuilt_index('robust04')
         self.searcher = LuceneSearcher.from_prebuilt_index('robust04')
-        # Other approaches here
+        self.reranker = None
 
-    def set_searcher(self, approach="qld", fb_terms=5, fb_docs=10, original_query_weight=0.8, mu=1000):
+    def set_searcher(self, approach="qld", fb_terms=5, fb_docs=10, original_query_weight=0.8, mu=1000, reranker='CE'):
         if approach=="qld":
             # Setting query likelihood with dirichlet prior
             self.searcher.set_qld(mu=mu)
@@ -69,7 +93,9 @@ class SearchEngine:
             self.searcher.set_rm3(fb_terms=fb_terms, fb_docs=fb_docs, original_query_weight=original_query_weight)
         elif approach=="bm25":
             self.searcher.set_bm25(k1=0.5, b=0.36)
-            self.searcher.set_rm3(fb_terms=20,fb_docs=5,original_query_weight=0.6)
+            self.searcher.set_rm3(fb_terms=fb_terms,fb_docs=fb_docs,original_query_weight=original_query_weight)
+        if reranker is not None:
+            self.reranker = Reranker(reranker)
 
     def get_top_k(self, query, k=5, clean=True  ):
         """
@@ -97,10 +123,13 @@ class SearchEngine:
         hits = self.get_top_k(query, k, clean=True) # Hits are score-sorted by default
         top_m = hits[:m]
         passages_top_m = split_passages(top_m)
-        top_m_reranked = rerank(query, passages_top_m)
-        top_m_fused = [Hit(docid=doc_score_tuple[0], score=doc_score_tuple[1]) for doc_score_tuple in weighted_rrf_fuse([top_m_reranked, top_m], weights=[1-fusion_weight,fusion_weight])]
-        all_docs_reranked = top_m_fused + hits[m:]
-        return all_docs_reranked
+        if self.reranker:
+            top_m_reranked = self.reranker.rerank(query, passages_top_m)
+            top_m_fused = [Hit(docid=doc_score_tuple[0], score=doc_score_tuple[1]) for doc_score_tuple in weighted_rrf_fuse([top_m_reranked, top_m], weights=[1-fusion_weight,fusion_weight])]
+            all_docs_reranked = top_m_fused + hits[m:]
+            return all_docs_reranked
+        else:
+            return top_m
 
 
     def search_and_write_trec_run(self, query, k, topic_id, run_tag, output_file, m=100, fusion_weight=0):
@@ -119,6 +148,7 @@ class SearchEngine:
         :param run_tag: name of run to write as the format
         :param output_file: name of outputfile (default: run.txt)
         :param m: reranking threshold (default: 100)
+        :param fusion_weight: rrf weight (default: 0)
         :return:
         """
 

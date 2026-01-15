@@ -1,5 +1,7 @@
 --extra-index-url https://download.pytorch.org/whl/cu126
+accelerate
 torch
+faiss-cpu
 torchvision
 pyserini==0.36.0
 python-dotenv
@@ -9,3 +11,4 @@ seaborn
 sentence-transformers
 langchain-core
 langchain-text-splitters
+mxbai-rerank
