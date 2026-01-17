@@ -18,6 +18,8 @@ print(DEVICE)
 CROSS_ENCODER = os.getenv("CROSS_ENCODER")
 SUPPORTED_RERANKERS = ["CE", "mxbai", "monot5", "twolar"]
 
+
+
 def weighted_rrf_fuse(runs, weights=None, rrf_k=60):
     """
     runs: list[list[Hit]] docids ordered best->worst
@@ -97,7 +99,7 @@ class SearchEngine:
         if reranker is not None:
             self.reranker = Reranker(reranker)
 
-    def get_top_k(self, query, k=5, clean=True  ):
+    def get_top_k(self, query, k=5, clean=True):
         """
         Get the top k ranked (full) documents using the searcher
         :param query: the query
@@ -115,46 +117,64 @@ class SearchEngine:
                 cleaned_doc, doc_metadata = clean_robust(raw_doc)
                 context.append(Hit(query=query, docid=hit.docid, score=hit.score, meta=doc_metadata, text=cleaned_doc))
             else:
-                context.append(Hit(query=query, docid=hit.docid, score=hit.score))
+                context.append(Hit(query=query, docid=hit.docid, score=hit.score, text=raw_doc))
         return context
 
-    def retrieve_rerank(self, query, k=1000, m=100, fusion_weight=0):
+    def multi_query_fuse(self, qid, topics_list, llm_query_fusion_weights, k=1000):
+        top_ks = []
+        for topics in topics_list:
+            query = topics[qid]
+            top_ks.append(self.get_top_k(query, k, clean=True))
+        # TODO check this. should replace "get_top_k" in line 135 in the next function. Also check how well it does vanilla.
+        top_k_fused = [Hit(docid=doc_score_tuple[0], score=doc_score_tuple[1], text="something") for doc_score_tuple in weighted_rrf_fuse(top_ks, weights=llm_query_fusion_weights)]
+        return top_k_fused
+
+    def retrieve_rerank(self, query, k=1000, m=100, fusion_weights=None):
+        if fusion_weights is None:
+            fusion_weights = [0]
         assert k>=m, "initial retrieval k must be bigger-equal than fine reranker m"
-        hits = self.get_top_k(query, k, clean=True) # Hits are score-sorted by default
+        hits = self.get_top_k(query, k, clean=True)  # Hits are score-sorted by default
         top_m = hits[:m]
         passages_top_m = split_passages(top_m)
         if self.reranker:
             top_m_reranked = self.reranker.rerank(query, passages_top_m)
-            top_m_fused = [Hit(docid=doc_score_tuple[0], score=doc_score_tuple[1]) for doc_score_tuple in weighted_rrf_fuse([top_m_reranked, top_m], weights=[1-fusion_weight,fusion_weight])]
-            all_docs_reranked = top_m_fused + hits[m:]
+            top_m_fused_permutations = [[Hit(docid=doc_score_tuple[0], score=doc_score_tuple[1]) for doc_score_tuple in weighted_rrf_fuse([top_m_reranked, top_m], weights=[1-fusion_weight,fusion_weight])] for fusion_weight in fusion_weights]
+            all_docs_reranked = [top_m_fused + hits[m:] for top_m_fused in top_m_fused_permutations]
             return all_docs_reranked
         else:
-            return top_m
+            return [hits]
 
 
-    def search_and_write_trec_run(self, query, k, topic_id, run_tag, output_file, m=100, fusion_weight=0):
-        hits = self.retrieve_rerank(query, k, m, fusion_weight)
-        with open(output_file, "a", encoding="utf-8") as f:
-            for rank, hit in enumerate(hits, start=1):
-                f.write(
-                    f"{topic_id} Q0 {hit.docid} {rank} {hit.score:.6f} {run_tag}\n"
-                )
+    def search_and_write_trec_run(self, query, k, topic_id, run_tag, output_file, m=100, fusion_weights=None):
+        if fusion_weights is None:
+            fusion_weights = [0]
+        hits_per_fusion_weight = self.retrieve_rerank(query, k, m, fusion_weights)
+        for i, hits in enumerate(hits_per_fusion_weight):
+            with open(f"Results/{output_file}_rrf_{fusion_weights[i]}.txt", "a", encoding="utf-8") as f:
+                for rank, hit in enumerate(hits, start=1):
+                    f.write(
+                        f"{topic_id} Q0 {hit.docid} {rank} {hit.score:.6f} {run_tag}\n"
+                    )
 
-    def search_all_queries(self, topics, k=1000, run_tag="run1", output_file="run.txt", m=100, fusion_weight=0):
+
+    def search_all_queries(self, topics_list, k=1000, run_tag="run1", output_file="run.txt", m=100,
+                           llm_query_fusion_weights=None,
+                           rerank_fusion_weights=None):
         """
         Search all queries according to topics list
-        :param topics: list of [(query id, query]
+        :param topics_list: list of [(query id, query] for topic in topics. Each topic is taken form a .txt listing all queries.
         :param k: top results to retrieve (default: 1000)
         :param run_tag: name of run to write as the format
         :param output_file: name of outputfile (default: run.txt)
         :param m: reranking threshold (default: 100)
-        :param fusion_weight: rrf weight (default: 0)
-        :return:
+        :param llm_query_fusion_weights: list of fusion weights on multiple query datasets (default: [1,0...,0])
+        :param rerank_fusion_weights: rrf weights to experiment with (default: 0)
         """
-
-        # Clear the file
-        with open(output_file, "w", encoding="utf-8") as f:
-            pass
-
-        for qid, query in tqdm(topics.items(), desc="Searching topics"):
-            self.search_and_write_trec_run(query, k, qid, run_tag, output_file, m=m, fusion_weight=fusion_weight)
+        if rerank_fusion_weights is None:
+            rerank_fusion_weights = [0]
+        if llm_query_fusion_weights is None:
+            llm_query_fusion_weights = [1]+[0]*(len(topics_list)-1)
+        # TODO assuming topics_list is [topics] this should work. Make multiple llm fuse work
+        # TODO also try reranking 400 not 100 see if shit changes.
+        for qid, query in tqdm(topics_list[0].items(), desc="Searching topics"):
+            self.search_and_write_trec_run(query, k, qid, run_tag, output_file, m=m, fusion_weights=rerank_fusion_weights)
