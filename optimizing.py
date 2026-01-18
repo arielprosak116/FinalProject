@@ -17,7 +17,8 @@ class Optimize:
                      bs=None,
                      k=200,
                      qrels_path="Data/qrels_50_Queries",
-                     results_file="bm25rm3_best_results.txt"):
+                     results_file="bm25rm3_best_results.txt",
+                     run_file_path="run.txt"):
 
         with open(results_file, "w", encoding="utf-8") as f:
             f.write("fb_terms\tfb_docs\toriginal_query_weight\tMAP\n")
@@ -47,8 +48,8 @@ class Optimize:
                                                      k1=k1,
                                                      b=b)
 
-                                self.se.search_all_queries(topics, k)
-                                run = load_run("run.txt")
+                                self.se.search_all_queries(topics, k, output_file=run_file_path)
+                                run = load_run(run_file_path)
 
                                 map_score, ap_by_q = mean_average_precision(qrels, run)
 
