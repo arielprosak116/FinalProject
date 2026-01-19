@@ -8,6 +8,7 @@ from pyserini.search.lucene import LuceneSearcher
 from processing import split_passages, clean_robust, Hit
 from sentence_transformers import CrossEncoder
 from mxbai_rerank import MxbaiRerankV2
+from inranker import T5Ranker
 import re
 from collections import defaultdict
 import torch
@@ -16,7 +17,7 @@ import torch
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(DEVICE)
 CROSS_ENCODER = os.getenv("CROSS_ENCODER")
-SUPPORTED_RERANKERS = ["CE", "mxbai", "monot5", "twolar"]
+SUPPORTED_RERANKERS = ["CE", "mxbai", "monot5", "twolar", "inranker"]
 
 
 
@@ -52,6 +53,8 @@ class Reranker:
             self.model = MxbaiRerankV2("mixedbread-ai/mxbai-rerank-large-v2", device=device)
             print(device)
             self.model.to(device)
+        elif self.model = T5Ranker(model_name_or_path="unicamp-dl/InRanker-3B")
+
         else:
             raise NotImplementedError("Type not implemented yet sry :(")
 
