@@ -128,7 +128,7 @@ class SearchEngine:
         return context
 
 
-    def multi_query_fuse(self, qid, topics_list, llm_query_fusion_weights, k=1000):
+    def multi_query_fuse(self, qid, topics_list, llm_query_fusion_weights, k=1000, rrf_k=60):
         top_ks = []
         assert len(llm_query_fusion_weights) == len(topics_list), "Weight & lists mismatch"
         if len(topics_list) > 1:
@@ -137,17 +137,17 @@ class SearchEngine:
                     continue
                 query = topics[qid]
                 top_ks.append(self.get_top_k(query, k, clean=True, qid=qid))
-            top_k_fused = weighted_rrf_fuse(top_ks, weights=llm_query_fusion_weights, save_text=True)
+            top_k_fused = weighted_rrf_fuse(top_ks, weights=llm_query_fusion_weights, rrf_k=rrf_k, save_text=True)
             return top_k_fused
         else:
             return self.get_top_k(topics_list[0][qid], k, clean=True, qid=qid)
 
-    def retrieve_rerank(self, query, hits, m=100, fusion_weights=None):
+    def retrieve_rerank(self, query, hits, m=100, fusion_weights=None, rrf_k=60):
         top_m = hits[:m]
         passages_top_m = split_passages(top_m)
         if self.reranker:
             top_m_reranked = self.reranker.rerank(query, passages_top_m)
-            top_m_fused_permutations = [weighted_rrf_fuse([top_m_reranked, top_m], weights=[1-fusion_weight,fusion_weight]) for fusion_weight in fusion_weights]
+            top_m_fused_permutations = [weighted_rrf_fuse([top_m_reranked, top_m], weights=[1-fusion_weight,fusion_weight], rrf_k=rrf_k) for fusion_weight in fusion_weights]
             all_docs_reranked = [top_m_fused + hits[m:] for top_m_fused in top_m_fused_permutations]
             return all_docs_reranked
         else:
@@ -157,23 +157,39 @@ class SearchEngine:
     def search_and_write_trec_run(self, query, k, topic_id, run_tag, output_file, fusion_weights=None,
                                   query_weights=None,
                                   topics_lists=None,
-                                  m=100):
+                                  m=100,
+                                  rrf_k=60,
+                                  should_rerank_embeded=True):
         if fusion_weights is None:
             fusion_weights = [0]
         assert k >= m, "initial retrieval k must be bigger-equal than fine reranker m"
-        hits = self.multi_query_fuse(topic_id, topics_lists, query_weights, k=k)  # Hits are score-sorted by default
-        hits_per_fusion_weight = self.retrieve_rerank(query, hits, m, fusion_weights)
-        for i, hits in enumerate(hits_per_fusion_weight):
-            with open(f"Results/{output_file}_rrf_{fusion_weights[i]}.txt", "a", encoding="utf-8") as f:
+        hits = self.multi_query_fuse(topic_id, topics_lists, query_weights, k=k, rrf_k=rrf_k)  # Hits are score-sorted by default
+        final_hits = None if should_rerank_embeded else hits
+
+        if final_hits is None:
+            hits_per_fusion_weight = self.retrieve_rerank(query, hits, m, fusion_weights, rrf_k=rrf_k)
+            final_hits = hits_per_fusion_weight
+
+            for i, hits in enumerate(final_hits):
+                with open(f"Results/{output_file}_rrf_{fusion_weights[i]}.txt", "a", encoding="utf-8") as f:
+                    for rank, hit in enumerate(hits, start=1):
+                        f.write(
+                            f"{topic_id} Q0 {hit.docid} {rank} {hit.score:.6f} {run_tag}\n"
+                        )
+        else:
+            with open(f"Results/{output_file}_rrf_ariel_hits.txt", "a", encoding="utf-8") as f:
                 for rank, hit in enumerate(hits, start=1):
                     f.write(
                         f"{topic_id} Q0 {hit.docid} {rank} {hit.score:.6f} {run_tag}\n"
                     )
 
 
+
     def search_all_queries(self, topics_lists, k=1000, run_tag="run1", output_file="run.txt", m=100,
                            llm_query_fusion_weights=None,
-                           rerank_fusion_weights=None):
+                           rerank_fusion_weights=None,
+                           rrf_k=60,
+                           should_rerank_embedded=True):
         """
         Search all queries according to topics list
         :param topics_lists: list of [(query id, query] for topic in topics. Each topic is taken form a .txt listing all queries.
@@ -194,4 +210,4 @@ class SearchEngine:
         for qid, query in tqdm(topics_lists[0].items(), desc="Searching topics"):
             self.search_and_write_trec_run(query, k, qid, run_tag, output_file, m=m,
                                            fusion_weights=rerank_fusion_weights, query_weights=llm_query_fusion_weights,
-                                           topics_lists=topics_lists)
+                                           topics_lists=topics_lists, rrf_k=rrf_k, should_rerank_embeded=should_rerank_embedded)
