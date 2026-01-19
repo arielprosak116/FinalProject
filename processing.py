@@ -1,14 +1,13 @@
 import os
 import ast
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.documents import Document
 from dotenv import load_dotenv
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple, List, Union
 from pathlib import Path
 import json
-
+from collections import defaultdict
 
 load_dotenv()
 SPLITTER_ARGS = ast.literal_eval(os.getenv("SPLITTER_ARGS"))
@@ -31,6 +30,7 @@ _TEXT_MARKER = re.compile(r"^\s*\[Text\]\s*", re.IGNORECASE)
 class Hit:
     docid: str
     score: float
+    qid: Optional[int] = None
     query: Optional[str] = None
     text: Optional[str] = None
     meta: Dict[str, Any] = field(default_factory=dict)
@@ -103,9 +103,6 @@ def create_llm_generated_queries(
         out_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding=encoding)
 
     return tuple(out_paths)
-
-
-
 
 def write_topk_jsonl_query(hits, out_path, qid):
     """

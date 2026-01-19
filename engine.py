@@ -20,25 +20,29 @@ SUPPORTED_RERANKERS = ["CE", "mxbai", "monot5", "twolar"]
 
 
 
-def weighted_rrf_fuse(runs, weights=None, rrf_k=60):
+def weighted_rrf_fuse(runs, weights=None, rrf_k=60, save_text=False):
     """
     runs: list[list[Hit]] docids ordered best->worst
     weights: list[float] same length as runs, defaults to 1/len(runs) each
+    save_text: Save the text field (relevant if this isn't the final step)
     """
     assert sum(weights) == 1.0, "Weights must sum to 1.0"
     if weights is None:
         weights = [1/len(runs)] * len(runs)
     scores = defaultdict(float)
+    texts = defaultdict(str)
     for run, w in zip(runs, weights):
         for rank, hit in enumerate(run, start=1):
             scores[hit.docid] += w * (1.0 / (rrf_k + rank))
+            texts[hit.docid] = hit.text if save_text else None
 
     fused = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    return [(docid, score) for docid, score in fused]
+    return [Hit(docid=docid, score=score, text=texts[docid]) for docid, score in fused]
+
 
 
 class Reranker:
-    def __init__(self, reranker_type, device=DEVICE, **kwargs):
+    def __init__(self, reranker_type, device=DEVICE):
         self.reranker_type = reranker_type
         if self.reranker_type not in SUPPORTED_RERANKERS:
             raise ValueError(f"reranker_type must be in {SUPPORTED_RERANKERS}")
@@ -81,6 +85,8 @@ class Reranker:
         ranked = sorted(collated_doc_scores.items(), key=lambda x: x[1], reverse=True)
         return [Hit(docid=doc[0], score=doc[1]) for doc in ranked]
 
+
+
 class SearchEngine:
     def __init__(self):
         self.reader = IndexReader.from_prebuilt_index('robust04')
@@ -99,12 +105,13 @@ class SearchEngine:
         if reranker is not None:
             self.reranker = Reranker(reranker)
 
-    def get_top_k(self, query, k=5, clean=True):
+    def get_top_k(self, query, k=5, clean=True, qid=None):
         """
         Get the top k ranked (full) documents using the searcher
         :param query: the query
         :param k: top results to retrieve (default: 5)
         :param clean: Whether to clean the retrieved docs and extract metadata (default: True)
+        :param qid: query id
         :return:
         """
         context = []
@@ -115,40 +122,47 @@ class SearchEngine:
             raw_doc = doc.raw()
             if clean:
                 cleaned_doc, doc_metadata = clean_robust(raw_doc)
-                context.append(Hit(query=query, docid=hit.docid, score=hit.score, meta=doc_metadata, text=cleaned_doc))
+                context.append(Hit(qid=qid, query=query, docid=hit.docid, score=hit.score, meta=doc_metadata, text=cleaned_doc))
             else:
-                context.append(Hit(query=query, docid=hit.docid, score=hit.score, text=raw_doc))
+                context.append(Hit(qid=qid, query=query, docid=hit.docid, score=hit.score, text=raw_doc))
         return context
+
 
     def multi_query_fuse(self, qid, topics_list, llm_query_fusion_weights, k=1000):
         top_ks = []
-        for topics in topics_list:
-            query = topics[qid]
-            top_ks.append(self.get_top_k(query, k, clean=True))
-        # TODO check this. should replace "get_top_k" in line 135 in the next function. Also check how well it does vanilla.
-        top_k_fused = [Hit(docid=doc_score_tuple[0], score=doc_score_tuple[1], text="something") for doc_score_tuple in weighted_rrf_fuse(top_ks, weights=llm_query_fusion_weights)]
-        return top_k_fused
+        assert len(llm_query_fusion_weights) == len(topics_list), "Weight & lists mismatch"
+        if len(topics_list) > 1:
+            for i, topics in enumerate(topics_list):
+                if llm_query_fusion_weights[i] == 0:
+                    continue
+                query = topics[qid]
+                top_ks.append(self.get_top_k(query, k, clean=True, qid=qid))
+            top_k_fused = weighted_rrf_fuse(top_ks, weights=llm_query_fusion_weights, save_text=True)
+            return top_k_fused
+        else:
+            return self.get_top_k(topics_list[0][qid], k, clean=True, qid=qid)
 
-    def retrieve_rerank(self, query, k=1000, m=100, fusion_weights=None):
-        if fusion_weights is None:
-            fusion_weights = [0]
-        assert k>=m, "initial retrieval k must be bigger-equal than fine reranker m"
-        hits = self.get_top_k(query, k, clean=True)  # Hits are score-sorted by default
+    def retrieve_rerank(self, query, hits, m=100, fusion_weights=None):
         top_m = hits[:m]
         passages_top_m = split_passages(top_m)
         if self.reranker:
             top_m_reranked = self.reranker.rerank(query, passages_top_m)
-            top_m_fused_permutations = [[Hit(docid=doc_score_tuple[0], score=doc_score_tuple[1]) for doc_score_tuple in weighted_rrf_fuse([top_m_reranked, top_m], weights=[1-fusion_weight,fusion_weight])] for fusion_weight in fusion_weights]
+            top_m_fused_permutations = [weighted_rrf_fuse([top_m_reranked, top_m], weights=[1-fusion_weight,fusion_weight]) for fusion_weight in fusion_weights]
             all_docs_reranked = [top_m_fused + hits[m:] for top_m_fused in top_m_fused_permutations]
             return all_docs_reranked
         else:
             return [hits]
 
 
-    def search_and_write_trec_run(self, query, k, topic_id, run_tag, output_file, m=100, fusion_weights=None):
+    def search_and_write_trec_run(self, query, k, topic_id, run_tag, output_file, fusion_weights=None,
+                                  query_weights=None,
+                                  topics_lists=None,
+                                  m=100):
         if fusion_weights is None:
             fusion_weights = [0]
-        hits_per_fusion_weight = self.retrieve_rerank(query, k, m, fusion_weights)
+        assert k >= m, "initial retrieval k must be bigger-equal than fine reranker m"
+        hits = self.multi_query_fuse(topic_id, topics_lists, query_weights, k=k)  # Hits are score-sorted by default
+        hits_per_fusion_weight = self.retrieve_rerank(query, hits, m, fusion_weights)
         for i, hits in enumerate(hits_per_fusion_weight):
             with open(f"Results/{output_file}_rrf_{fusion_weights[i]}.txt", "a", encoding="utf-8") as f:
                 for rank, hit in enumerate(hits, start=1):
@@ -157,24 +171,27 @@ class SearchEngine:
                     )
 
 
-    def search_all_queries(self, topics_list, k=1000, run_tag="run1", output_file="run.txt", m=100,
+    def search_all_queries(self, topics_lists, k=1000, run_tag="run1", output_file="run.txt", m=100,
                            llm_query_fusion_weights=None,
                            rerank_fusion_weights=None):
         """
         Search all queries according to topics list
-        :param topics_list: list of [(query id, query] for topic in topics. Each topic is taken form a .txt listing all queries.
+        :param topics_lists: list of [(query id, query] for topic in topics. Each topic is taken form a .txt listing all queries.
         :param k: top results to retrieve (default: 1000)
         :param run_tag: name of run to write as the format
         :param output_file: name of outputfile (default: run.txt)
         :param m: reranking threshold (default: 100)
-        :param llm_query_fusion_weights: list of fusion weights on multiple query datasets (default: [1,0...,0])
+        :param llm_query_fusion_weights: list of fusion weights on multiple query ablations (default: [1,0...,0])
         :param rerank_fusion_weights: rrf weights to experiment with (default: 0)
         """
         if rerank_fusion_weights is None:
             rerank_fusion_weights = [0]
         if llm_query_fusion_weights is None:
-            llm_query_fusion_weights = [1]+[0]*(len(topics_list)-1)
+            llm_query_fusion_weights = [1]+[0]*(len(topics_lists) - 1)
+
         # TODO assuming topics_list is [topics] this should work. Make multiple llm fuse work
         # TODO also try reranking 400 not 100 see if shit changes.
-        for qid, query in tqdm(topics_list[0].items(), desc="Searching topics"):
-            self.search_and_write_trec_run(query, k, qid, run_tag, output_file, m=m, fusion_weights=rerank_fusion_weights)
+        for qid, query in tqdm(topics_lists[0].items(), desc="Searching topics"):
+            self.search_and_write_trec_run(query, k, qid, run_tag, output_file, m=m,
+                                           fusion_weights=rerank_fusion_weights, query_weights=llm_query_fusion_weights,
+                                           topics_lists=topics_lists)
