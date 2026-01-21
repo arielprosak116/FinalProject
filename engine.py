@@ -7,8 +7,8 @@ from pyserini.index.lucene import IndexReader
 from pyserini.search.lucene import LuceneSearcher
 from processing import split_passages, clean_robust, Hit
 from sentence_transformers import CrossEncoder
-from mxbai_rerank import MxbaiRerankV2
-from inranker import T5Ranker
+# from mxbai_rerank import MxbaiRerankV2
+# from inranker import T5Ranker
 import re
 from collections import defaultdict
 import torch
@@ -17,8 +17,21 @@ import torch
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(DEVICE)
 CROSS_ENCODER = os.getenv("CROSS_ENCODER")
-SUPPORTED_RERANKERS = ["CE", "mxbai", "monot5", "twolar", "inranker"]
+SUPPORTED_RERANKERS = ["CE", "QWEN_CE", "mxbai", "monot5", "twolar", "inranker"]
 
+
+def format_queries(query, instruction=None):
+    prefix = '<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>\n<|im_start|>user\n'
+    if instruction is None:
+        instruction = (
+            "Given a web search query, retrieve relevant passages that answer the query"
+        )
+    return f"{prefix}<Instruct>: {instruction}\n<Query>: {query}\n"
+
+
+def format_document(document):
+    suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    return f"<Document>: {document}{suffix}"
 
 
 def weighted_rrf_fuse(runs, weights=None, rrf_k=60, save_text=False):
@@ -27,7 +40,7 @@ def weighted_rrf_fuse(runs, weights=None, rrf_k=60, save_text=False):
     weights: list[float] same length as runs, defaults to 1/len(runs) each
     save_text: Save the text field (relevant if this isn't the final step)
     """
-    assert sum(weights) == 1.0, "Weights must sum to 1.0"
+    assert abs(sum(weights) - 1.0) < 1e-8, "Weights must sum to 1.0"
     if weights is None:
         weights = [1/len(runs)] * len(runs)
     scores = defaultdict(float)
@@ -43,18 +56,23 @@ def weighted_rrf_fuse(runs, weights=None, rrf_k=60, save_text=False):
 
 
 class Reranker:
-    def __init__(self, reranker_type, device=DEVICE):
+    def __init__(self, reranker_type, cross_encoder_name=None, device=DEVICE):
         self.reranker_type = reranker_type
+        self.model_name = cross_encoder_name if cross_encoder_name else CROSS_ENCODER
         if self.reranker_type not in SUPPORTED_RERANKERS:
             raise ValueError(f"reranker_type must be in {SUPPORTED_RERANKERS}")
         if self.reranker_type == 'CE':
-            self.model = CrossEncoder(CROSS_ENCODER, device=DEVICE)
-        elif self.reranker_type == 'mxbai':
-            self.model = MxbaiRerankV2("mixedbread-ai/mxbai-rerank-large-v2", device=device)
-            print(device)
-            self.model.to(device)
-        elif self.model = T5Ranker(model_name_or_path="unicamp-dl/InRanker-3B")
+            self.model = CrossEncoder(self.model_name, device=DEVICE)
 
+        elif self.reranker_type == 'QWEN_CE':
+            self.model = CrossEncoder(self.model_name, device=DEVICE)
+        # elif self.reranker_type == 'mxbai':
+        #     self.model = MxbaiRerankV2("mixedbread-ai/mxbai-rerank-large-v2", device=device)
+        #     print(device)
+        #     self.model.to(device)
+        # elif self.reranker_type == "inranker":
+        #     self.model = T5Ranker(model_name_or_path="unicamp-dl/InRanker-3B", device=device)
+        #     print(device)
         else:
             raise NotImplementedError("Type not implemented yet sry :(")
 
@@ -65,22 +83,47 @@ class Reranker:
             text = WS_NEWLINES.sub(" ", text)
             text = WS_SPACES.sub(" ", text)
             return text
-
         def _collated_doc_score(scores, max_weight=0.8):
             return max(scores) * max_weight + (1 - max_weight) * (sum(scores) - max(scores)) / (len(scores) - 1) if len(scores) > 1 else max(scores)
 
         cleaned_docs = [_remove_whitespaces(doc.page_content) for doc in retrieval_candidates]
         per_doc_scores = defaultdict(list)
+
         if self.reranker_type == 'CE':
             pairs = [[query, cleaned_doc] for cleaned_doc in cleaned_docs]
             cross_scores = self.model.predict(pairs)
             for score, doc in zip(cross_scores, retrieval_candidates):
                 per_doc_scores[doc.metadata['docid']].append(score)
+
         if self.reranker_type == 'mxbai':
             id2doc = {i:doc.metadata['docid'] for i, doc in enumerate(retrieval_candidates)}
             cross_scores = self.model.rank(query, cleaned_docs, return_documents=False)
             for score in cross_scores:
                 per_doc_scores[id2doc[score.index]].append(score.score)
+
+        if self.reranker_type == 'inranker':
+            id2doc = {i: doc.metadata['docid'] for i, doc in enumerate(retrieval_candidates)}
+            scores = self.model.get_scores(
+                query=query,
+                docs=cleaned_docs
+            )
+            # Scores are sorted in descending order (most relevant to least)
+            # scores -> [0, 1]
+            sorted_scores = sorted(zip(scores, cleaned_docs), key=lambda x: x[0], reverse=True)
+            for i,(score,_) in sorted_scores:
+                per_doc_scores[id2doc[i]].append(score)
+
+        if self.reranker_type == 'QWEN_CE':
+            task = "Given a web search query, retrieve relevant passages that answer the query"
+            queries = [query]*len(cleaned_docs)
+            pairs = [
+                [format_queries(query, task), format_document(doc)]
+                for query, doc in zip(queries,cleaned_docs)
+            ]
+            cross_scores = self.model.predict(pairs)
+            for score, doc in zip(cross_scores, retrieval_candidates):
+                per_doc_scores[doc.metadata['docid']].append(score)
+
 
         collated_doc_scores = {}
         for docid, scores in per_doc_scores.items():
@@ -96,17 +139,18 @@ class SearchEngine:
         self.searcher = LuceneSearcher.from_prebuilt_index('robust04')
         self.reranker = None
 
-    def set_searcher(self, approach="qld", fb_terms=5, fb_docs=10, original_query_weight=0.8, mu=1000, reranker='CE'):
+    def set_searcher(self, approach="qld", k1=0.5, b=0.36, fb_terms=5, fb_docs=10, original_query_weight=0.8, mu=1000,
+                     reranker_type='CE', reranker=CROSS_ENCODER):
         if approach=="qld":
             # Setting query likelihood with dirichlet prior
             self.searcher.set_qld(mu=mu)
             # Setting RM3 expanding the query, with a safe alpha
             self.searcher.set_rm3(fb_terms=fb_terms, fb_docs=fb_docs, original_query_weight=original_query_weight)
         elif approach=="bm25":
-            self.searcher.set_bm25(k1=0.5, b=0.36)
+            self.searcher.set_bm25(k1=k1, b=b)
             self.searcher.set_rm3(fb_terms=fb_terms,fb_docs=fb_docs,original_query_weight=original_query_weight)
-        if reranker is not None:
-            self.reranker = Reranker(reranker)
+        if reranker is not None and reranker_type is not None:
+            self.reranker = Reranker(reranker_type, cross_encoder_name=reranker)
 
     def get_top_k(self, query, k=5, clean=True, qid=None):
         """
@@ -164,12 +208,12 @@ class SearchEngine:
                                   rrf_k_queries=9,
                                   rrf_k_reranker=60):
         if fusion_weights is None:
-            fusion_weights = [0]
+            fusion_weights = [1]
         assert k >= m, "initial retrieval k must be bigger-equal than fine reranker m"
         hits = self.multi_query_fuse(topic_id, topics_lists, query_weights, k=k, rrf_k=rrf_k_queries)  # Hits are score-sorted by default
         hits_per_fusion_weight = self.retrieve_rerank(query, hits, m, fusion_weights, rrf_k=rrf_k_reranker)
         for i, hits in enumerate(hits_per_fusion_weight):
-            with open(f"Results/{output_file}_rrf_{fusion_weights[i]}.txt", "a", encoding="utf-8") as f:
+            with open(f"{output_file}_rrf_rerank_{fusion_weights[i]}.txt", "a", encoding="utf-8") as f:
                 for rank, hit in enumerate(hits, start=1):
                     f.write(
                         f"{topic_id} Q0 {hit.docid} {rank} {hit.score:.6f} {run_tag}\n"
@@ -177,7 +221,7 @@ class SearchEngine:
 
 
 
-    def search_all_queries(self, topics_lists, k=1000, run_tag="run1", output_file="run.txt", m=100,
+    def search_all_queries(self, topics_lists, k=1000, run_tag="run1", output_file="run.txt", output_dir='Results', m=100,
                            llm_query_fusion_weights=None,
                            rerank_fusion_weights=None,
                            rrf_k_queries=9,
@@ -188,6 +232,7 @@ class SearchEngine:
         :param k: top results to retrieve (default: 1000)
         :param run_tag: name of run to write as the format
         :param output_file: name of outputfile (default: run.txt)
+        :param output_dir: name of output directory (default: Results)
         :param m: reranking threshold (default: 100)
         :param llm_query_fusion_weights: list of fusion weights on multiple query ablations (default: [1,0...,0])
         :param rerank_fusion_weights: rrf weights to experiment with (default: 0)
@@ -195,10 +240,10 @@ class SearchEngine:
         :param rrf_k_reranker: RRF reranking constant
         """
         if rerank_fusion_weights is None:
-            rerank_fusion_weights = [0]
+            rerank_fusion_weights = [1]
         if llm_query_fusion_weights is None:
             llm_query_fusion_weights = [1]+[0]*(len(topics_lists) - 1)
         for qid, query in tqdm(topics_lists[0].items(), desc="Searching topics"):
-            self.search_and_write_trec_run(query, k, qid, run_tag, output_file, m=m,
+            self.search_and_write_trec_run(query, k, qid, run_tag, os.path.join(output_dir, output_file), m=m,
                                            fusion_weights=rerank_fusion_weights, query_weights=llm_query_fusion_weights,
                                            topics_lists=topics_lists, rrf_k_queries=rrf_k_queries, rrf_k_reranker=rrf_k_reranker)

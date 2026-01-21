@@ -11,4 +11,3 @@ seaborn
 sentence-transformers
 langchain-core
 langchain-text-splitters
-mxbai-rerank
