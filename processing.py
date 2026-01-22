@@ -234,3 +234,37 @@ def clean_robust(raw) -> Tuple[str, Dict[str, Union[str, List[str]]]]:
 
 def split_passages(hits: List[Hit], splitter=SPLITTER_SINGLETON):
     return splitter.split_documents(hits)
+
+
+def load_run_as_hits(run_path: str) -> Dict[str, List[Hit]]:
+    """
+    Reads a TREC run file and returns:
+      { qid -> [Hit(docid=..., score=..., query=qid), ...] }
+
+    Expected line format:
+      qid Q0 docid rank score tag
+    """
+    runs: Dict[str, List[Hit]] = defaultdict(list)
+
+    with open(run_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+
+            parts = line.split()
+            if len(parts) < 6:
+                raise ValueError(f"Invalid run line: {line}")
+
+            qid, _, docid, rank, score, _ = parts
+
+            runs[qid].append(
+                Hit(
+                    docid=docid,
+                    score=float(score),
+                    query=qid
+                )
+            )
+
+    return dict(runs)
+

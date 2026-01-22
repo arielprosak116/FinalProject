@@ -11,3 +11,5 @@ seaborn
 sentence-transformers
 langchain-core
 langchain-text-splitters
+numpy
+pandas

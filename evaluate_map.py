@@ -183,7 +183,8 @@ def evaluate_run(
         first_vals, rr_vals = [], []
 
         for qid, qrels_for_q in qrels.items():
-            ranked = run.get(qid, [])[:k]
+            ranked = run.get(qid, [])
+            ranked = ranked[:k]
 
             ap_vals.append(average_precision(ranked, qrels_for_q))
             p_vals.append(precision_at_k(ranked, qrels_for_q, k))

@@ -112,14 +112,14 @@ class Optimize:
         # --- grid search ---
         all_perms = len(query_fusion_weights_lists)*len(fb_terms_values)*len(fb_docs_values)*len(bm25_k1_values)*len(bm25_b_values)*len(rrf_k_values)
         i=0
-        for query_fusion_weights in query_fusion_weights_lists:
+        for query_fusion_weights_id, query_fusion_weights in enumerate(query_fusion_weights_lists):
             for fb_terms in fb_terms_values:
                 for fb_docs in fb_docs_values:
                     for k1 in bm25_k1_values:
                         for b in bm25_b_values:
                             for rrf_k in rrf_k_values:
                                 self.se.set_searcher(approach="bm25", k1=k1, b=b, fb_terms=fb_terms, reranker_type=None)
-                                run_name = f"{run_tag}_fbT{fb_terms}_fbD{fb_docs}_k1{k1}_b{b}_rrf{rrf_k}"
+                                run_name = f"{run_tag}_fbT{fb_terms}_fbD{fb_docs}_k1{k1}_b{b}_rrf{rrf_k}_{query_fusion_weights_id}"
                                 run_path = out_dir / run_name
                                 self.se.search_all_queries(
                                     topics_lists=topics_lists,

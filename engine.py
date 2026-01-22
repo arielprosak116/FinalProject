@@ -6,14 +6,14 @@ from tqdm import tqdm
 from pyserini.index.lucene import IndexReader
 from pyserini.search.lucene import LuceneSearcher
 from processing import split_passages, clean_robust, Hit
-from sentence_transformers import CrossEncoder
+from sentence_transformers import CrossEncoder, SentenceTransformer
 # from mxbai_rerank import MxbaiRerankV2
 # from inranker import T5Ranker
 import re
 from collections import defaultdict
 import torch
 
-
+from processing import load_run_as_hits
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(DEVICE)
 CROSS_ENCODER = os.getenv("CROSS_ENCODER")
@@ -48,7 +48,8 @@ def weighted_rrf_fuse(runs, weights=None, rrf_k=60, save_text=False):
     for run, w in zip(runs, weights):
         for rank, hit in enumerate(run, start=1):
             scores[hit.docid] += w * (1.0 / (rrf_k + rank))
-            texts[hit.docid] = hit.text if save_text else None
+            if hit.text is not None:
+                texts[hit.docid] = hit.text if save_text else None
 
     fused = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     return [Hit(docid=docid, score=score, text=texts[docid]) for docid, score in fused]
@@ -206,11 +207,15 @@ class SearchEngine:
                                   topics_lists=None,
                                   m=100,
                                   rrf_k_queries=9,
-                                  rrf_k_reranker=60):
+                                  rrf_k_reranker=60,
+                                  vdb_results=None):
         if fusion_weights is None:
             fusion_weights = [1]
         assert k >= m, "initial retrieval k must be bigger-equal than fine reranker m"
         hits = self.multi_query_fuse(topic_id, topics_lists, query_weights, k=k, rrf_k=rrf_k_queries)  # Hits are score-sorted by default
+        if vdb_results is not None:
+            hits_for_query = vdb_results[topic_id]
+            hits = weighted_rrf_fuse([hits_for_query, hits], weights=[0.4,0.6], rrf_k=200, save_text=True)
         hits_per_fusion_weight = self.retrieve_rerank(query, hits, m, fusion_weights, rrf_k=rrf_k_reranker)
         for i, hits in enumerate(hits_per_fusion_weight):
             with open(f"{output_file}_rrf_rerank_{fusion_weights[i]}.txt", "a", encoding="utf-8") as f:
@@ -225,7 +230,8 @@ class SearchEngine:
                            llm_query_fusion_weights=None,
                            rerank_fusion_weights=None,
                            rrf_k_queries=9,
-                           rrf_k_reranker=60):
+                           rrf_k_reranker=60,
+                           vdb_result_path=None):
         """
         Search all queries according to topics list
         :param topics_lists: list of [(query id, query] for topic in topics. Each topic is taken form a .txt listing all queries.
@@ -239,6 +245,8 @@ class SearchEngine:
         :param rrf_k_queries: Query fusion RRF constant
         :param rrf_k_reranker: RRF reranking constant
         """
+
+        hits_sem = load_run_as_hits(vdb_result_path) if vdb_result_path is not None else None
         if rerank_fusion_weights is None:
             rerank_fusion_weights = [1]
         if llm_query_fusion_weights is None:
@@ -246,4 +254,5 @@ class SearchEngine:
         for qid, query in tqdm(topics_lists[0].items(), desc="Searching topics"):
             self.search_and_write_trec_run(query, k, qid, run_tag, os.path.join(output_dir, output_file), m=m,
                                            fusion_weights=rerank_fusion_weights, query_weights=llm_query_fusion_weights,
-                                           topics_lists=topics_lists, rrf_k_queries=rrf_k_queries, rrf_k_reranker=rrf_k_reranker)
+                                           topics_lists=topics_lists, rrf_k_queries=rrf_k_queries,
+                                           rrf_k_reranker=rrf_k_reranker, vdb_results=hits_sem)
